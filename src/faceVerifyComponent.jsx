@@ -139,14 +139,73 @@ const FaceVerification = () => {
     }
   };
 
-  const connectWebSocket = () => {
-    const ws = new WebSocket('ws://localhost:5000/ws');
+  // const connectWebSocket = () => {
+  //   const ws = new WebSocket('ws://localhost:5002/ws');
 
+  //   ws.onopen = () => {
+  //     setState((prev) => ({ ...prev, isConnected: true, error: null }));
+  //     console.log('WebSocket connected');
+  //   };
+
+  //   ws.onmessage = (event) => {
+  //     const data = JSON.parse(event.data);
+  //     const isComplete = data.state >= 5;
+
+  //     if (isComplete && !completedRef.current) {
+  //       completedRef.current = true;
+  //       // Don't stop frame capture - keep camera running for restart
+  //       setState((prev) => ({
+  //         ...prev,
+  //         currentStep: data.state || 0,
+  //         isComplete: true,
+  //         totalTime: data.total_time || 0,
+  //         completionTime: data.total_time || 0,
+  //         yaw: data.yaw || 0,
+  //         faceDetected: data.face_detected !== false,
+  //         error: data.error || null,
+  //         progress: 100,
+  //       }));
+  //     } else if (!isComplete) {
+  //       completedRef.current = false;
+  //       setState((prev) => ({
+  //         ...prev,
+  //         currentStep: data.state || 0,
+  //         isComplete: false,
+  //         totalTime: data.total_time || 0,
+  //         yaw: data.yaw || 0,
+  //         faceDetected: data.face_detected !== false,
+  //         error: data.error || null,
+  //         progress: ((data.state || 0) / 5) * 100,
+  //       }));
+  //     }
+  //   };
+
+  //   ws.onerror = () => {
+  //     setState((prev) => ({ ...prev, error: 'Connection error. Check if server is running.' }));
+  //   };
+
+  //   ws.onclose = () => {
+  //     setState((prev) => ({ ...prev, isConnected: false }));
+  //     setTimeout(connectWebSocket, 3000);
+  //   };
+
+  //   wsRef.current = ws;
+  // };
+
+  const connectWebSocket = () => {
+    // Use the same protocol & host as the current page
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws`;  // → /ws on same domain/port
+  
+    console.log('Connecting WebSocket to:', wsUrl);  // ← helpful for debugging
+  
+    const ws = new WebSocket(wsUrl);
+  
     ws.onopen = () => {
       setState((prev) => ({ ...prev, isConnected: true, error: null }));
       console.log('WebSocket connected');
     };
-
+  
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
       const isComplete = data.state >= 5;
@@ -179,16 +238,17 @@ const FaceVerification = () => {
         }));
       }
     };
-
-    ws.onerror = () => {
-      setState((prev) => ({ ...prev, error: 'Connection error. Check if server is running.' }));
+  
+    ws.onerror = (err) => {
+      console.error('WebSocket error:', err);
+      setState((prev) => ({ ...prev, error: 'Connection error. Check backend.' }));
     };
-
+  
     ws.onclose = () => {
       setState((prev) => ({ ...prev, isConnected: false }));
-      setTimeout(connectWebSocket, 3000);
+      setTimeout(connectWebSocket, 3000); // auto-reconnect
     };
-
+  
     wsRef.current = ws;
   };
 
