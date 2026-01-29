@@ -15,8 +15,14 @@ const FaceVerification = () => {
     faceDetected: true,
   });
 
+  const [cameraError, setCameraError] = useState(null);
+  const [cameraReady, setCameraReady] = useState(false);
+
   const wsRef = useRef(null);
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
   const completedRef = useRef(false);
+  const frameIntervalRef = useRef(null);
 
   const INSTRUCTIONS = [
     { step: 1, text: 'Blink Your Eyes', hint: 'Close and open both eyes', color: '#667eea' },
@@ -26,27 +32,128 @@ const FaceVerification = () => {
     { step: 5, text: 'Open Your Mouth', hint: 'Open your mouth wide, then close it', color: '#22c55e' },
   ];
 
+  // Initialize camera
+  useEffect(() => {
+    startCamera();
+    return () => {
+      stopCamera();
+    };
+  }, []);
+
+  // Initialize WebSocket
   useEffect(() => {
     connectWebSocket();
     return () => {
-      if (wsRef.current) wsRef.current.close();
+      if (wsRef.current) {
+        wsRef.current.close();
+      }
     };
   }, []);
+
+  const startCamera = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          width: { ideal: 640 },
+          height: { ideal: 480 },
+          facingMode: 'user'
+        }
+      });
+
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.onloadedmetadata = () => {
+          videoRef.current.play();
+          setCameraReady(true);
+          startFrameCapture();
+        };
+      }
+    } catch (err) {
+      console.error('Camera access error:', err);
+      setCameraError('Camera access denied. Please allow camera permissions.');
+    }
+  };
+
+  const stopCamera = () => {
+    if (videoRef.current && videoRef.current.srcObject) {
+      const tracks = videoRef.current.srcObject.getTracks();
+      tracks.forEach(track => track.stop());
+    }
+    if (frameIntervalRef.current) {
+      clearInterval(frameIntervalRef.current);
+    }
+  };
+
+  const startFrameCapture = () => {
+    // Send frames to server at ~10 FPS
+    frameIntervalRef.current = setInterval(() => {
+      captureAndSendFrame();
+    }, 100); // 100ms = 10 FPS
+  };
+
+  const captureAndSendFrame = () => {
+    // Don't send frames if complete, but keep capturing for display
+    if (!videoRef.current || !canvasRef.current || !wsRef.current || 
+        wsRef.current.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    
+    // Skip sending to server if verification is complete
+    if (state.isComplete) {
+      return;
+    }
+
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    
+    // Check if video is ready
+    if (video.readyState !== 4 || video.videoWidth === 0 || video.videoHeight === 0) {
+      return; // Video not ready yet
+    }
+
+    const context = canvas.getContext('2d');
+
+    // Set canvas size to match video
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+
+    // Draw current frame
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    try {
+      // Convert to base64
+      const frameData = canvas.toDataURL('image/jpeg', 0.8);
+      
+      // Validate frame data
+      if (!frameData || frameData.length < 100) {
+        return; // Invalid frame
+      }
+
+      // Send to server
+      wsRef.current.send(JSON.stringify({
+        action: 'process_frame',
+        frame: frameData
+      }));
+    } catch (err) {
+      console.error('Frame capture error:', err);
+    }
+  };
 
   const connectWebSocket = () => {
     const ws = new WebSocket('ws://localhost:5000/ws');
 
     ws.onopen = () => {
       setState((prev) => ({ ...prev, isConnected: true, error: null }));
+      console.log('WebSocket connected');
     };
 
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
-    //   console.log("data", data);
       const isComplete = data.state >= 5;
 
       if (isComplete && !completedRef.current) {
         completedRef.current = true;
+        // Don't stop frame capture - keep camera running for restart
         setState((prev) => ({
           ...prev,
           currentStep: data.state || 0,
@@ -87,9 +194,13 @@ const FaceVerification = () => {
 
   const handleRestart = () => {
     completedRef.current = false;
+    
+    // Send restart command
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ action: 'restart' }));
     }
+    
+    // Update state - frame capture is already running, it will resume sending
     setState((prev) => ({
       ...prev,
       currentStep: 0,
@@ -126,46 +237,60 @@ const FaceVerification = () => {
             >
               <CircularProgressbar
                 value={state.progress}
-                strokeWidth={2} // ← feel free to try 6–10
+                strokeWidth={2}
                 styles={buildStyles({
                   pathColor: progressColor,
                   trailColor: '#e5e7eb',
                   strokeLinecap: 'round',
-                  pathTransitionDuration: 0.5, // smooth animation
-                  rotation: 0, // starts from top (12 o'clock)
+                  pathTransitionDuration: 0.5,
+                  rotation: 0,
                 })}
               />
             </div>
+
             {/* Video Frame */}
             <div style={styles.videoFrame}>
-            {/* Only show camera feed while verification is in progress */}
-            {!state.isComplete && (
-                <img
-                src="http://localhost:5000/video"
-                alt="Camera Feed"
+              {/* Camera Feed - Hidden canvas for processing */}
+              <canvas ref={canvasRef} style={{ display: 'none' }} />
+              
+              {/* Actual Video Display - Always show, overlay will cover when complete */}
+              <video
+                ref={videoRef}
+                autoPlay
+                playsInline
+                muted
                 style={styles.videoStream}
-                onError={() => setState(prev => ({ ...prev, error: 'Failed to load video stream' }))}
-                />
-            )}
+              />
 
-            {/* Completion Overlay */}
-            {state.isComplete && (
+              {/* Camera Error Overlay */}
+              {cameraError && (
+                <div style={styles.errorOverlay}>
+                  <div style={styles.warningIcon}>📷</div>
+                  <div style={styles.warningText}>{cameraError}</div>
+                  <button onClick={startCamera} style={styles.retryBtn}>
+                    Retry Camera Access
+                  </button>
+                </div>
+              )}
+
+              {/* Completion Overlay - Covers video but video still runs underneath */}
+              {state.isComplete && (
                 <div style={styles.completionOverlay}>
-                <div style={styles.checkmark}>✓</div>
-                <div style={styles.completionText}>Verified!</div>
-                <div style={styles.completionTime}>
+                  <div style={styles.checkmark}>✓</div>
+                  <div style={styles.completionText}>Verified!</div>
+                  <div style={styles.completionTime}>
                     Completed in {state.completionTime.toFixed(1)}s
+                  </div>
                 </div>
-                </div>
-            )}
+              )}
 
-            {/* No Face Overlay — only relevant while stream is active */}
-            {!state.isComplete && !state.faceDetected && (
+              {/* No Face Overlay */}
+              {!state.isComplete && !state.faceDetected && cameraReady && (
                 <div style={styles.noFaceOverlay}>
-                <div style={styles.warningIcon}>⚠️</div>
-                <div style={styles.warningText}>No Face Detected</div>
+                  <div style={styles.warningIcon}>⚠️</div>
+                  <div style={styles.warningText}>No Face Detected</div>
                 </div>
-            )}
+              )}
             </div>
           </div>
 
@@ -179,20 +304,19 @@ const FaceVerification = () => {
           </div>
 
           {/* Instruction Box */}
-            <div style={styles.instructionBox}>
+          <div style={styles.instructionBox}>
             <div style={styles.instructionRowCentered}>
-                <div style={{ ...styles.stepNumber, background: currentInstruction.color }}>
+              <div style={{ ...styles.stepNumber, background: currentInstruction.color }}>
                 {currentInstruction.step}
-                </div>
-                <div style={styles.instructionText}>
+              </div>
+              <div style={styles.instructionText}>
                 {currentInstruction.text}
-                </div>
+              </div>
             </div>
             <div style={styles.instructionHint}>
-                {currentInstruction.hint}
+              {currentInstruction.hint}
             </div>
-            </div>
-
+          </div>
         </div>
 
         {/* Status Section */}
@@ -201,16 +325,20 @@ const FaceVerification = () => {
           <div
             style={{
               ...styles.connectionStatus,
-              ...(state.isConnected ? styles.connected : styles.disconnected),
+              ...(state.isConnected && cameraReady ? styles.connected : styles.disconnected),
             }}
           >
             <div
               style={{
                 ...styles.statusDot,
-                background: state.isConnected ? '#22c55e' : '#ef4444',
+                background: state.isConnected && cameraReady ? '#22c55e' : '#ef4444',
               }}
             />
-            <span>{state.isConnected ? 'Connected' : 'Reconnecting...'}</span>
+            <span>
+              {!cameraReady ? 'Initializing camera...' : 
+               !state.isConnected ? 'Reconnecting to server...' : 
+               'Connected'}
+            </span>
           </div>
 
           {/* Error Message */}
@@ -297,12 +425,25 @@ const styles = {
     borderRadius: '50%',
     overflow: 'hidden',
     margin: '10px',
-    // border: '3px solid #e5e7eb',
+    background: '#000',
   },
   videoStream: {
     width: '100%',
     height: '100%',
     objectFit: 'cover',
+    transform: 'scaleX(-1)', // Mirror the video
+  },
+  errorOverlay: {
+    position: 'absolute',
+    inset: 0,
+    background: 'rgba(239, 68, 68, 0.95)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexDirection: 'column',
+    gap: '16px',
+    borderRadius: '50%',
+    zIndex: 3,
   },
   completionOverlay: {
     position: 'absolute',
@@ -357,6 +498,17 @@ const styles = {
     textAlign: 'center',
     padding: '0 20px',
   },
+  retryBtn: {
+    padding: '12px 24px',
+    background: 'white',
+    color: '#ef4444',
+    border: 'none',
+    borderRadius: '8px',
+    fontSize: '14px',
+    fontWeight: 600,
+    cursor: 'pointer',
+    marginTop: '8px',
+  },
   progressText: {
     textAlign: 'center',
     fontSize: 'clamp(12px, 3vw, 14px)',
@@ -366,50 +518,46 @@ const styles = {
   progressBar: {
     fontWeight: 600,
   },
- instructionBox: {
-  width: '90%',
-  padding: '20px 16px',
-  background: '#f9fafb',
-  borderRadius: '12px',
-  border: '2px solid #e5e7eb',
-  textAlign: 'center',           // ← important for centering text content
-},
-
-instructionRowCentered: {
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  gap: '12px 16px',
-  flexWrap: 'wrap',
-  marginBottom: '10px',
-},
-
-stepNumber: {
-  flexShrink: 0,
-  width: 'clamp(36px, 9vw, 44px)',
-  height: 'clamp(36px, 9vw, 44px)',
-  borderRadius: '50%',
-  color: 'white',
-  fontWeight: 700,
-  fontSize: 'clamp(16px, 4.2vw, 20px)',
-  lineHeight: 'clamp(36px, 9vw, 44px)',
-  textAlign: 'center',
-},
-
-instructionText: {
-  fontSize: 'clamp(17px, 4.5vw, 20px)',
-  fontWeight: 600,
-  color: '#1f2937',
-  lineHeight: 1.35,
-},
-
-instructionHint: {
-  fontSize: 'clamp(13px, 3.4vw, 15px)',
-  color: '#6b7280',
-  lineHeight: 1.4,
-  maxWidth: '90%',
-  margin: '0 auto',              // helps center long hints
-},
+  instructionBox: {
+    width: '90%',
+    padding: '20px 16px',
+    background: '#f9fafb',
+    borderRadius: '12px',
+    border: '2px solid #e5e7eb',
+    textAlign: 'center',
+  },
+  instructionRowCentered: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '12px 16px',
+    flexWrap: 'wrap',
+    marginBottom: '10px',
+  },
+  stepNumber: {
+    flexShrink: 0,
+    width: 'clamp(36px, 9vw, 44px)',
+    height: 'clamp(36px, 9vw, 44px)',
+    borderRadius: '50%',
+    color: 'white',
+    fontWeight: 700,
+    fontSize: 'clamp(16px, 4.2vw, 20px)',
+    lineHeight: 'clamp(36px, 9vw, 44px)',
+    textAlign: 'center',
+  },
+  instructionText: {
+    fontSize: 'clamp(17px, 4.5vw, 20px)',
+    fontWeight: 600,
+    color: '#1f2937',
+    lineHeight: 1.35,
+  },
+  instructionHint: {
+    fontSize: 'clamp(13px, 3.4vw, 15px)',
+    color: '#6b7280',
+    lineHeight: 1.4,
+    maxWidth: '90%',
+    margin: '0 auto',
+  },
   statusSection: {
     padding: '0 clamp(16px, 4vw, 32px) clamp(16px, 4vw, 32px)',
     display: 'flex',
